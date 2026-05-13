@@ -1,0 +1,62 @@
+---
+
+# OpenTelemetry configuration for ingesting syslog messages into Netdata.
+
+receivers:
+
+  syslog:
+    location: "Europe/Athens"  # TODO: ensure correct timezone
+
+    udp:
+      listen_address: "0.0.0.0:53514"
+
+      add_attributes: false
+
+    protocol: rfc3164
+
+processors:
+
+  transform/syslog:
+
+    error_mode: ignore
+    log_statements:
+
+      # Set proper (resource) attributes per semantic conventions
+
+      - set(resource.attributes["host.name"], log.attributes["hostname"])
+      - delete_key(log.attributes, "hostname")
+
+      - set(resource.attributes["syslog.appname"], log.attributes["appname"])
+      - delete_key(log.attributes, "appname")
+
+      - set(resource.attributes["process.pid"], log.attributes["proc_id"])
+        where log.attributes["proc_id"] != nil
+      - delete_key(log.attributes, "proc_id")
+
+      - set(log.attributes["syslog.facility.number"],
+            Int(log.attributes["facility"]))
+      - delete_key(log.attributes, "facility")
+
+      - set(log.attributes["log.record.original"], log.body)
+      - set(log.body, log.attributes["message"])
+      - delete_key(log.attributes, "message")
+
+      - delete_key(log.attributes, "priority")
+
+exporters:
+  debug:
+    verbosity: detailed
+
+  otlp:
+    endpoint: localhost:4317
+    tls:
+      insecure: true
+
+service:
+
+  pipelines:
+
+    logs:
+      receivers: [syslog]
+      processors: [transform/syslog]
+      exporters: [otlp, debug]

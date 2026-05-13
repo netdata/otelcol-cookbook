@@ -1,0 +1,134 @@
+---
+
+# OpenTelemetry configuration for ingesting syslog messages into Netdata.
+#
+# This configuration listens for syslog over UDP on port 53514 and passes them
+# as OTLP logs to Netdata's OpenTelemetry Plugin.
+
+receivers:
+
+  syslog:
+
+    # RFC 3164 syslog timestamps do not include timezone or year information.
+    # Set the location to use to interpret the local timestamps provided.
+    #
+    # location: "UTC"
+    # location: "Europe/Amsterdam"
+    location: "Europe/Athens"  # TODO: ensure correct timezone
+
+    # Set the listener. UDP on port 514 or TCP on port 601 is standard, but
+    # other ports may be used
+    udp:
+      listen_address: "0.0.0.0:53514"
+
+      # Add network attributes for the connection
+      add_attributes: true  # TODO: disable to drop the network layer attributes
+
+    # The syslog protocol must match the one used by the sending entity
+    protocol: rfc3164  # TODO: ensure correct protocol
+    # protocol: rfc5424
+
+processors:
+
+  transform/syslog:
+
+    error_mode: ignore
+    log_statements:
+
+      # Set proper (resource) attributes per semantic conventions
+
+      - set(resource.attributes["host.name"], log.attributes["hostname"])
+      - delete_key(log.attributes, "hostname")
+
+      - set(resource.attributes["syslog.appname"], log.attributes["appname"])
+      - delete_key(log.attributes, "appname")
+
+      - set(resource.attributes["process.pid"], log.attributes["proc_id"])
+        where log.attributes["proc_id"] != nil
+      - delete_key(log.attributes, "proc_id")
+
+      - set(log.attributes["syslog.facility.number"],
+            Int(log.attributes["facility"]))
+      - delete_key(log.attributes, "facility")
+
+      - set(log.attributes["log.record.original"], log.body)
+      - set(log.body, log.attributes["message"])
+      - delete_key(log.attributes, "message")
+
+      - delete_key(log.attributes, "priority")
+
+      # RFC 5424 fields
+      #
+      # Note that the `syslog` namespace is not standardized
+
+      - set(log.attributes["syslog.version"], log.attributes["version"])
+        where log.attributes["version"] != nil
+      - delete_key(log.attributes, "version")
+
+      - set(log.attributes["syslog.message_id"], log.attributes["msg_id"])
+        where log.attributes["msg_id"] != nil
+      - delete_key(log.attributes, "msg_id")
+
+      - set(log.attributes["syslog.structured_attributes"],
+            log.attributes["structured_attributes"])
+        where log.attributes["structured_attributes"] != nil
+      - delete_key(log.attributes, "structured_attributes")
+
+      # Schema evolution for `add_attributes` in syslog/udp/tcp receivers
+
+      - set(log.attributes["client.address"], log.attributes["net.peer.name"])
+        where log.attributes["net.peer.name"] != nil
+      - delete_key(log.attributes, "net.peer.name")
+
+      - set(log.attributes["client.port"], Int(log.attributes["net.peer.port"]))
+        where log.attributes["net.peer.port"] != nil
+      - set(log.attributes["peer.port"], Int(log.attributes["net.peer.port"]))
+        where log.attributes["net.peer.port"] != nil
+      - delete_key(log.attributes, "net.peer.port")
+
+      - set(log.attributes["peer.address"], log.attributes["net.peer.ip"])
+        where log.attributes["net.peer.ip"] != nil
+      - delete_key(log.attributes, "net.peer.ip")
+
+      - set(log.attributes["server.address"], log.attributes["net.host.name"])
+        where log.attributes["net.host.name"] != nil
+      - delete_key(log.attributes, "net.host.name")
+
+      - set(log.attributes["server.port"], Int(log.attributes["net.host.port"]))
+        where log.attributes["net.host.port"] != nil
+      - set(log.attributes["local.port"], Int(log.attributes["net.host.port"]))
+        where log.attributes["net.host.port"] != nil
+      - delete_key(log.attributes, "net.host.port")
+
+      - set(log.attributes["local.address"], log.attributes["net.host.ip"])
+        where log.attributes["net.host.ip"] != nil
+      - delete_key(log.attributes, "net.host.ip")
+
+      - merge_maps(log.cache, ExtractPatterns(
+          log.attributes["net.transport"],
+          "^(?i)(ip).?(?P<transport>udp|tcp)$"),
+          "upsert")
+        where log.attributes["net.transport"] != nil
+      - set(log.attributes["network.transport"],
+            ToLowerCase(log.cache["transport"]))
+        where log.cache["transport"] != nil and log.cache["transport"] != ""
+      - delete_key(log.attributes, "net.transport")
+
+
+exporters:
+  debug:
+    verbosity: detailed
+
+  otlp:
+    endpoint: localhost:4317
+    tls:
+      insecure: true
+
+service:
+
+  pipelines:
+
+    logs:
+      receivers: [syslog]
+      processors: [transform/syslog]
+      exporters: [otlp, debug]
