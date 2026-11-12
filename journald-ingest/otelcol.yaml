@@ -1,0 +1,172 @@
+---
+
+# OpenTelemetry configuration for ingesting systemd journal messages into Netdata.
+#
+# The journald receiver follows the journal through the journalctl binary and
+# passes the entries as OTLP logs to Netdata's OpenTelemetry Plugin.
+
+receivers:
+
+  journald:
+
+    # Map well-known journald fields to OpenTelemetry Semantic Convention
+    # attributes (requires OpenTelemetry Collector Contrib >= v0.162.0):
+    # MESSAGE becomes the log body, PRIORITY sets the severity, and fields
+    # such as _HOSTNAME, _PID, _EXE and CODE_* become semconv attributes.
+    # All other fields are kept as `journald.<FIELD>` log attributes.
+    convert_to_semantic_conventions: true
+
+    # Start at the end of the journal and follow new entries. Set to
+    # "beginning" for a one-time replay of the current boot (can be a lot
+    # of logs; not recommended for steady-state operation).
+    start_at: end
+
+    # Minimum message priority. The default (info) does not ingest debug
+    # messages; uncomment to ingest everything.
+    # priority: debug
+
+    # Optionally restrict which units are ingested. These are passed to
+    # journalctl as --unit arguments / structured matches.
+    # TODO: enable to cut down on volume.
+    # units:
+    #   - sshd.service
+    #   - nginx.service
+    # matches:
+    #   - _TRANSPORT: driver
+
+    # Persist the read cursor so restarts resume where they left off
+    # (at-least-once). Without storage, the cursor is kept in memory only.
+    storage: file_storage/journald
+
+    # The receiver advances the cursor before batches are sent downstream;
+    # retry on failures instead of losing entries when Netdata is
+    # unreachable.
+    retry_on_failure:
+      enabled: true
+
+extensions:
+
+  file_storage/journald:
+    # TODO: choose cursor location, a persistent and writable directory
+    #
+    # directory: /var/lib/otelcol/journald
+    directory: /tmp/otelcol_filestorage_journald
+    create_directory: true
+
+  file_storage/otlp_sending_queue:
+    # TODO: choose queue location
+    #
+    # directory: /var/lib/otelcol/filestorage/otlp_sending_queue
+    directory: /tmp/otelcol_filestorage_otlp_sending_queue
+    create_directory: true
+
+processors:
+
+  batch:
+
+  transform/journald:
+
+    error_mode: ignore
+    log_statements:
+
+      # Service identity.
+      #
+      # Netdata keys its log streams on (service.namespace, service.name),
+      # so service.name must stay low-cardinality: only static unit names
+      # qualify, not template instances (name contains "@", e.g.
+      # polkit-agent-helper@1234-...service) nor generated scope units
+      # (kitty-12345.scope, app-...scope), whose per-session identifiers
+      # would create an unbounded number of streams. The `.service`
+      # suffix is dropped: sshd.service becomes the service sshd.
+      #
+      # The user manager unit takes precedence over the user@<uid>.service
+      # system unit it runs in. Everything else (kernel entries, scopes,
+      # template instances, sockets, timers) falls back to the program
+      # name reported as SYSLOG_IDENTIFIER.
+
+      - set(resource.attributes["service.name"],
+            log.attributes["journald._SYSTEMD_USER_UNIT"])
+        where log.attributes["journald._SYSTEMD_USER_UNIT"] != nil and IsMatch(
+            log.attributes["journald._SYSTEMD_USER_UNIT"], "^[^@]*\\.service$")
+
+      - set(resource.attributes["service.name"],
+            log.attributes["journald._SYSTEMD_UNIT"])
+        where resource.attributes["service.name"] == nil and IsMatch(
+            log.attributes["journald._SYSTEMD_UNIT"], "^[^@]*\\.service$")
+
+      - replace_pattern(resource.attributes["service.name"], "\\.service$", "")
+        where resource.attributes["service.name"] != nil
+
+      - set(resource.attributes["service.name"],
+            log.attributes["syslog.identifier"])
+        where resource.attributes["service.name"] == nil and IsMatch(
+            log.attributes["syslog.identifier"], "^.+$")
+
+      # Gap-fill semconv mappings for well-known journald fields that the
+      # receiver's own conversion does not cover (see
+      # https://www.freedesktop.org/software/systemd/man/latest/systemd.journal-fields.html).
+      #
+      # The source `journald.*` attributes are deliberately kept so the
+      # original field values remain available for drill-down.
+
+      # _MACHINE_ID is the stable machine ID of the host.
+      - set(resource.attributes["host.id"],
+            log.attributes["journald._MACHINE_ID"])
+        where resource.attributes["host.id"] == nil and IsMatch(
+            log.attributes["journald._MACHINE_ID"], "^[0-9a-f]{32}$")
+
+      # _UID is the numeric (effective) UID of the sending process.
+      - set(resource.attributes["process.user.id"],
+            Int(log.attributes["journald._UID"]))
+        where IsMatch(log.attributes["journald._UID"], "^[0-9]+$")
+
+      # _SYSTEMD_CGROUP is the control group path of the sending process.
+      - set(resource.attributes["process.linux.cgroup"],
+            log.attributes["journald._SYSTEMD_CGROUP"])
+        where resource.attributes["process.linux.cgroup"] == nil and IsMatch(
+            log.attributes["journald._SYSTEMD_CGROUP"], "^/")
+
+      # _SYSTEMD_INVOCATION_ID uniquely identifies this start of the unit,
+      # matching the service.instance.id definition of instances of the
+      # same service that exist at the same time. Journald stores it as a
+      # 32 hex digit string (or UUID syntax).
+      - set(resource.attributes["service.instance.id"],
+            log.attributes["journald._SYSTEMD_INVOCATION_ID"])
+        where resource.attributes["service.instance.id"] == nil and (IsMatch(
+            log.attributes["journald._SYSTEMD_INVOCATION_ID"], "^[0-9a-f]{32}$") or IsMatch(
+            log.attributes["journald._SYSTEMD_INVOCATION_ID"],
+            "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"))
+
+      # Drop per-entry bookkeeping fields with no analytical value.
+      - delete_key(log.attributes, "journald.__CURSOR")
+      - delete_key(log.attributes, "journald.__MONOTONIC_TIMESTAMP")
+      - delete_key(log.attributes, "journald.__SEQNUM")
+      - delete_key(log.attributes, "journald.__SEQNUM_ID")
+
+exporters:
+
+  debug:
+    verbosity: detailed
+
+  otlp:
+    endpoint: localhost:4317
+    tls:
+      insecure: true
+
+    # Buffer batches on disk so they survive collector restarts.
+    sending_queue:
+      enabled: true
+      storage: file_storage/otlp_sending_queue
+
+service:
+
+  extensions:
+    - file_storage/journald
+    - file_storage/otlp_sending_queue
+
+  pipelines:
+
+    logs:
+      receivers: [journald]
+      processors: [transform/journald, batch]
+      exporters: [otlp, debug]
