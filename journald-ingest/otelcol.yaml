@@ -47,16 +47,18 @@ receivers:
 extensions:
 
   file_storage/journald:
-    # TODO: choose cursor location, a persistent and writable directory
+    # TODO: choose cursor location, a persistent and writable directory.
+    # The .deb/.rpm package owns /var/lib/otelcol-contrib for its service
+    # user; create a subdirectory there for the cursor.
     #
-    # directory: /var/lib/otelcol/journald
+    # directory: /var/lib/otelcol-contrib/journald
     directory: /tmp/otelcol_filestorage_journald
     create_directory: true
 
   file_storage/otlp_sending_queue:
-    # TODO: choose queue location
+    # TODO: choose queue location (same advice as the cursor above)
     #
-    # directory: /var/lib/otelcol/filestorage/otlp_sending_queue
+    # directory: /var/lib/otelcol-contrib/otlp_sending_queue
     directory: /tmp/otelcol_filestorage_otlp_sending_queue
     create_directory: true
 
