@@ -38,11 +38,14 @@ receivers:
     # (at-least-once). Without storage, the cursor is kept in memory only.
     storage: file_storage/journald
 
-    # The receiver advances the cursor before batches are sent downstream;
-    # retry on failures instead of losing entries when Netdata is
-    # unreachable.
+    # The receiver advances the journal cursor before batches are handed
+    # downstream, so retries must never give up: with the default 5 minute
+    # budget the batch is discarded once it is exhausted, and the cursor
+    # has already moved past those entries. max_elapsed_time: 0 keeps
+    # retrying until delivery succeeds.
     retry_on_failure:
       enabled: true
+      max_elapsed_time: 0
 
 extensions:
 
@@ -155,7 +158,13 @@ exporters:
     tls:
       insecure: true
 
-    # Buffer batches on disk so they survive collector restarts.
+    # Buffer batches on disk so they survive collector restarts, and never
+    # give up on delivery: the default retry budget (5 minutes) discards
+    # queued batches when Netdata is unreachable for longer.
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 0
+
     sending_queue:
       enabled: true
       storage: file_storage/otlp_sending_queue

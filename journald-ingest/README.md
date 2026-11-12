@@ -59,13 +59,13 @@ The `transform` processor completes the semantic-convention picture for fields t
 5. Look at the ingested logs in the Netdata dashboard. A log record should have:
 
    - The `MESSAGE` field as `log.body`, and the severity (number and syslog level name) from `PRIORITY`.
-   - Resource attributes: `service.name`, `host.name`, `host.id`, `process.pid`, `process.executable.path`, `process.executable.name`, `process.command_line`, `process.user.id`, `process.linux.cgroup`, and `service.instance.id` (the unit's invocation ID, unique per unit start).
+   - Resource attributes: `service.name`, `host.name`, `host.id`, `process.user.id`, `process.linux.cgroup`, `service.instance.id` (the unit's invocation ID, unique per unit start), `process.pid`, `process.executable.path`, `process.executable.name`, and `process.command_line`. Entries emitted under a systemd unit carry all of them; `/dev/log` entries lack the executable-based ones (and the unit-derived ones when the sender runs outside any unit), and kernel messages carry no process fields at all.
    - Log attributes such as `syslog.facility.code`, `syslog.identifier`, and `code.file.path` where the sender provided them.
    - The remaining journal fields verbatim under `journald.*` attributes (the unit names are kept, so any derived attribute can be traced back).
 
 ## 🍽️ Serving
 
 - `service.name` is only derived from *static* unit names: template instances (`polkit-agent-helper@1234-….service`) and generated scope units (`kitty-12345.scope`, `app-….scope`) embed per-session identifiers — PIDs, random suffixes — and would turn every login, terminal or crash into a new Netdata log stream. Entries from those units (and kernel messages) fall back to the program name reported in `SYSLOG_IDENTIFIER`. If you prefer unit names verbatim, drop the `IsMatch` guards and the `replace_pattern` statement in the transform.
-- The receiver persists its journal cursor before handing entries downstream, so `retry_on_failure.enabled: true` is what keeps delivery at-least-once when the Netdata Agent is unreachable; keep it enabled unless losing those entries is acceptable.
+- Delivery is at-least-once: the disk-backed sending queue buffers the backlog while the Netdata Agent is unreachable, and the retries never give up (`max_elapsed_time: 0`) — the receiver persists its journal cursor before batches are handed downstream, so a finite retry budget would discard entries once exhausted (the default is 5 minutes). A known upstream limitation remains: a collector crash or restart while an entry is in flight can still skip it (open-telemetry/opentelemetry-collector-contrib#51794, fix in progress; #52686 tracks the related swallowed-error handling).
 - For a one-time backfill of everything since boot, set `start_at: beginning` — expect a large replay and remove the setting afterwards.
 - Once you are happy, remove the `debug` exporter from the `exporters` section and from the pipeline.
