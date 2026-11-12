@@ -15,19 +15,19 @@ The `transform` processor completes the semantic-convention picture for fields t
 
 ## 🥣 Preparation
 
-1. Give the user running the Collector access to the journal. Journal files are owned by `root:systemd-journal`, so add the user to the `systemd-journal` group:
-
-   ```sh
-   sudo usermod -aG systemd-journal <user>
-   ```
-
-   Then verify access (log out and back in first, so the new group is active):
+1. Check that the user which runs the Collector can read the journal (the receiver shells out to `journalctl`):
 
    ```sh
    sudo su -s /bin/bash -c 'journalctl --lines 5' <user>
    ```
 
-   You should see log lines, not a permission error.
+   If that prints log lines, you are done — many setups grant read access already, for example to `wheel` and `adm` via ACLs that systemd's tmpfiles rules place on the journal directories. If it complains about permissions, grant read access. Journal files are owned by `root:systemd-journal` with mode `0640`, so membership of the group your distribution uses is usually enough:
+
+   ```sh
+   sudo usermod -aG systemd-journal <user>
+   ```
+
+   (or `adm`/`wheel`, depending on the distribution and its ACL setup). Log out and back in, or restart the service, so the new group is active, then re-run the check.
 
 2. Edit `otelcol.yaml` at the locations marked `TODO`:
 
