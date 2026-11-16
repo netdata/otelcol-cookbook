@@ -37,18 +37,7 @@ The receiver delivers each event as a structured body. The `transform` processor
 
    The bookmarks (so restarts resume where they left off) and the on-disk sending queue are stored under `%ProgramData%\OpenTelemetry Collector`.
 
-3. Install the Collector with the MSI, and point its service at your configuration. Keep that configuration outside the installation folder: the MSI puts its own stock `config.yaml` there, which it [replaces on every upgrade](https://github.com/open-telemetry/opentelemetry-collector/issues/10043) and removes on uninstall. From an elevated PowerShell, in the folder with `otelcol.yaml` and the downloaded MSI (adjust the file name to its version):
-
-   ```powershell
-   New-Item -ItemType Directory -Force "$env:ProgramData\OpenTelemetry Collector" | Out-Null
-   Copy-Item .\otelcol.yaml "$env:ProgramData\OpenTelemetry Collector\config.yaml"
-   Start-Process msiexec.exe -Wait -ArgumentList '/i otelcol-contrib_0.165.0_windows_x64.msi /qn COLLECTOR_SVC_ARGS="--config ""C:\ProgramData\OpenTelemetry Collector\config.yaml"""'
-   ```
-
-   The service starts right away. After later changes to `C:\ProgramData\OpenTelemetry Collector\config.yaml`, run `Restart-Service otelcol-contrib`.
-
-   > [!WARNING]
-   > Pass the same `COLLECTOR_SVC_ARGS` when you upgrade to a newer MSI. Without it, the upgraded service runs the stock configuration from the installation folder: it sends nothing to Netdata, and it listens for OTLP and Jaeger traffic on all network interfaces. Running the same MSI again does not change the service; to recover, uninstall it (`msiexec /x <msi> /qn`) and run the installation command above again. Your configuration and the receivers' saved read positions in `%ProgramData%` are left alone by the installer.
+3. Install the Collector as a service with `otelcol.yaml` as its configuration, as described in the main README's [Windows section](../README.md#-windows): the configuration goes to `%ProgramData%\OpenTelemetry Collector\config.yaml`, never to the stock `config.yaml` in the installation folder, which upgrades replace. Mind the warning there about upgrades. The receivers' saved read positions live next to the configuration and survive upgrades and reinstalls.
 
    Alternatively, run the binary directly from an elevated prompt:
 
