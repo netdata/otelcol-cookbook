@@ -170,21 +170,30 @@ processors:
 
       # Without rendering information (suppress_rendering_info, or a
       # provider that is not installed on this host) the level is the raw
-      # number. Name it as Windows does, so the statements below apply.
+      # number. Name it as Windows does (Event Viewer shows level 0, used
+      # by classic events, as Information). Provider-defined levels (16
+      # and up) have no standard name and keep their number.
+      - set(log.body["level"], "Information") where log.body["level"] == "0"
       - set(log.body["level"], "Critical") where log.body["level"] == "1"
       - set(log.body["level"], "Error") where log.body["level"] == "2"
       - set(log.body["level"], "Warning") where log.body["level"] == "3"
       - set(log.body["level"], "Information") where log.body["level"] == "4"
       - set(log.body["level"], "Verbose") where log.body["level"] == "5"
 
-      # Severity. The receiver sets the severity number from the level
-      # name, but no severity text, maps Critical to FATAL instead of
-      # ERROR2 and leaves Verbose unspecified. Align with the Logs Data
-      # Model's SeverityNumber mapping for WinEvtLog.
+      # Severity, following the Logs Data Model's SeverityNumber mapping
+      # for WinEvtLog. The receiver sets no severity text, maps Critical
+      # to FATAL instead of ERROR2, and leaves Verbose and numeric levels
+      # unspecified, so set the number for every named level.
       - set(log.severity_text, log.body["level"])
         where IsString(log.body["level"]) and log.body["level"] != ""
       - set(log.severity_number, SEVERITY_NUMBER_ERROR2)
         where log.body["level"] == "Critical"
+      - set(log.severity_number, SEVERITY_NUMBER_ERROR)
+        where log.body["level"] == "Error"
+      - set(log.severity_number, SEVERITY_NUMBER_WARN)
+        where log.body["level"] == "Warning"
+      - set(log.severity_number, SEVERITY_NUMBER_INFO)
+        where log.body["level"] == "Information"
       - set(log.severity_number, SEVERITY_NUMBER_DEBUG)
         where log.body["level"] == "Verbose"
 
@@ -259,13 +268,14 @@ processors:
       # Finally, the rendered message becomes the body. The remaining keys
       # (system_time, level, computer, rendering_info) duplicate the
       # timestamp, the severity and the fields above. Events whose provider
-      # has no message for the event ID get a synthesized one.
+      # has no message for the event ID get a synthesized one, named after
+      # the service (the provider, or else the channel).
       - set(log.body, log.body["message"])
         where IsMap(log.body) and IsString(log.body["message"]) and
             log.body["message"] != ""
-      - set(log.body, Format("%s event %d", [log.attributes["winlog.provider_name"],
+      - set(log.body, Format("%s event %d", [log.attributes["service.name"],
             log.attributes["winlog.event_id"]]))
-        where IsMap(log.body) and log.attributes["winlog.provider_name"] != nil and
+        where IsMap(log.body) and log.attributes["service.name"] != nil and
             log.attributes["winlog.event_id"] != nil
 
   # Promote the staged identity attributes to the resource, splitting

@@ -44,6 +44,9 @@ The receiver delivers each event as a structured body. The `transform` processor
    Restart-Service otelcol-contrib
    ```
 
+   > [!WARNING]
+   > The MSI owns that `config.yaml`. Upgrading the Collector with a newer MSI silently replaces it with the stock configuration, and uninstalling removes it. Keep your edited `otelcol.yaml` outside the installation directory, and after every upgrade run the two commands above again. Until you do, the Collector runs the stock configuration: it sends nothing to Netdata, and it listens for OTLP and Jaeger traffic on all network interfaces. Once your configuration is back, the receivers resume from their saved positions in `%ProgramData%`, so events logged in between are still ingested while the channels hold them.
+
    Alternatively, run the binary directly from an elevated prompt:
 
    ```powershell
@@ -75,7 +78,7 @@ Each `windows_event_log` receiver reads one channel. Application and System are 
 - To filter events, or to read several channels with one receiver, use an [XML query](https://learn.microsoft.com/en-us/windows/win32/wes/consuming-events) instead of `channel`. The commented `windows_event_log/errors` receiver selects only critical and error events from Application and System. Event Viewer can generate the XML: create a custom view, then copy its XML tab.
 - To exclude noisy providers from a channel, add them to `exclude_providers`. Every receiver that reads the Application channel, including queries that select it, must keep `otelcol-contrib` in that list: the Collector service logs there under that name, and ingesting its own logs would feed them back into the pipeline.
 
-Each receiver resolves SIDs to account names (`resolve_sids`) through the Windows Local Security Authority, with a cache. Besides `user.name`, the receiver adds the resolved names next to every SID field in the event payload, such as `winlog.event_data.TargetUserSid_Account`. It can only resolve accounts of the local system and of the domain the host belongs to.
+Each receiver resolves SIDs to account names (`resolve_sids`) through the Windows Local Security Authority, with a cache. Besides `user.name`, the receiver adds the resolved names next to the payload fields whose name ends in `Sid`, such as `winlog.event_data.TargetUserSid_Account`. It can only resolve accounts of the local system and of the domain the host belongs to.
 
 ## 🔒 Securing the connection
 
@@ -115,8 +118,8 @@ When several Windows hosts send logs to the same Netdata Agent, a firewall rule 
 
 - To tell these events apart from other OTLP sources on the node, filter on `scope.name` = `github.com/open-telemetry/opentelemetry-collector-contrib/receiver/windowseventlogreceiver`. Every event also carries `winlog.*` attributes.
 - `service.name` is the event provider, a fixed name registered on the system (such as `Service Control Manager` or `Microsoft-Windows-Security-Auditing`), so the number of Netdata log streams stays bounded. Events without a provider name fall back to the channel name.
-- Severity follows the Logs Data Model: `Critical` maps to ERROR2, `Error` to ERROR, `Warning` to WARN, `Information` to INFO, and `Verbose` to DEBUG. This also applies when Windows cannot provide the level name (for example with `suppress_rendering_info`), in which case the transform names the numeric level itself. The receiver matches the English level names only. On Windows installations in another display language, the severity text is the localized name and the severity number stays unspecified.
-- When the provider has no message for the event ID, the body becomes `<provider> event <ID>`, and the event's details are in `winlog.event_data`.
+- Severity follows the Logs Data Model: `Critical` maps to ERROR2, `Error` to ERROR, `Warning` to WARN, `Information` to INFO, and `Verbose` to DEBUG. This also applies when Windows cannot provide the level name (for example with `suppress_rendering_info`), in which case the transform names the numeric level itself; level 0, used by classic event sources, becomes `Information`, as in Event Viewer. Provider-defined levels (16 and up) keep their number as severity text, with an unspecified severity. The receiver matches the English level names only. On Windows installations in another display language, the severity text is the localized name and the severity number stays unspecified.
+- When the provider has no message for the event ID, the body becomes `<service.name> event <ID>`, and the event's details are in `winlog.event_data`.
 - Delivery is at-least-once: the disk-backed sending queue buffers the backlog while the Netdata Agent is unreachable, and the retries never give up (`max_elapsed_time: 0`). The receiver moves its bookmark past each batch after handing it downstream, whether or not that succeeded, so a finite retry budget would discard events once it runs out (the default is 5 minutes). A collector crash or restart while events are in flight can still skip them. When the Collector stops while the Netdata Agent is unreachable, it logs `Exporting failed. Dropping data.` for the batches it was retrying; in testing, the disk-backed queue still delivered them after the restart.
 - For a one-time backfill of everything a channel still holds, set `start_at: beginning` on its receiver. Expect a large replay and remove the setting afterwards.
 - The Collector service logs to the Application channel under the `otelcol-contrib` provider, which the receivers exclude. Look for its messages in Event Viewer.
