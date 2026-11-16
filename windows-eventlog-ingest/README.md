@@ -37,15 +37,18 @@ The receiver delivers each event as a structured body. The `transform` processor
 
    The bookmarks (so restarts resume where they left off) and the on-disk sending queue are stored under `%ProgramData%\OpenTelemetry Collector`.
 
-3. Start the Collector using the provided configuration. With the MSI installation, replace the installed configuration and restart the service from an elevated PowerShell:
+3. Install the Collector with the MSI, and point its service at your configuration. Keep that configuration outside the installation folder: the MSI puts its own stock `config.yaml` there, which it [replaces on every upgrade](https://github.com/open-telemetry/opentelemetry-collector/issues/10043) and removes on uninstall. From an elevated PowerShell, in the folder with `otelcol.yaml` and the downloaded MSI (adjust the file name to its version):
 
    ```powershell
-   Copy-Item .\otelcol.yaml "C:\Program Files\OpenTelemetry Collector\config.yaml"
-   Restart-Service otelcol-contrib
+   New-Item -ItemType Directory -Force "$env:ProgramData\OpenTelemetry Collector" | Out-Null
+   Copy-Item .\otelcol.yaml "$env:ProgramData\OpenTelemetry Collector\config.yaml"
+   Start-Process msiexec.exe -Wait -ArgumentList '/i otelcol-contrib_0.165.0_windows_x64.msi /qn COLLECTOR_SVC_ARGS="--config ""C:\ProgramData\OpenTelemetry Collector\config.yaml"""'
    ```
 
+   The service starts right away. After later changes to `C:\ProgramData\OpenTelemetry Collector\config.yaml`, run `Restart-Service otelcol-contrib`.
+
    > [!WARNING]
-   > The MSI owns that `config.yaml`. Upgrading the Collector with a newer MSI silently replaces it with the stock configuration, and uninstalling removes it. Keep your edited `otelcol.yaml` outside the installation directory, and after every upgrade run the two commands above again. Until you do, the Collector runs the stock configuration: it sends nothing to Netdata, and it listens for OTLP and Jaeger traffic on all network interfaces. Once your configuration is back, the receivers resume from their saved positions in `%ProgramData%`, so events logged in between are still ingested while the channels hold them.
+   > Pass the same `COLLECTOR_SVC_ARGS` when you upgrade to a newer MSI. Without it, the upgraded service runs the stock configuration from the installation folder: it sends nothing to Netdata, and it listens for OTLP and Jaeger traffic on all network interfaces. Running the same MSI again does not change the service; to recover, uninstall it (`msiexec /x <msi> /qn`) and run the installation command above again. Your configuration and the receivers' saved read positions in `%ProgramData%` are left alone by the installer.
 
    Alternatively, run the binary directly from an elevated prompt:
 
