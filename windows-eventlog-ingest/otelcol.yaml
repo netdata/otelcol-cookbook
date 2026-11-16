@@ -34,6 +34,18 @@ receivers:
       enabled: true
       max_elapsed_time: 0
 
+    # Resolve SIDs to account names with the Local Security Authority. The
+    # transform below maps the resolved account to user.name.
+    resolve_sids:
+      enabled: true
+
+    # Running as a Windows service, the Collector writes its own logs to
+    # the Application channel under this provider name. Ingesting them
+    # would feed the Collector's output back into itself. Keep this on
+    # every receiver that reads the Application channel.
+    exclude_providers:
+      - otelcol-contrib
+
   windows_event_log/system:
     channel: System
     start_at: end
@@ -41,6 +53,8 @@ receivers:
     retry_on_failure:
       enabled: true
       max_elapsed_time: 0
+    resolve_sids:
+      enabled: true
 
   # TODO: enable to ingest the Security channel. Reading it requires
   # administrative rights (the service installed by the MSI runs as
@@ -54,9 +68,6 @@ receivers:
   #   retry_on_failure:
   #     enabled: true
   #     max_elapsed_time: 0
-  #
-  #   # Resolve SIDs to account names with the Local Security Authority.
-  #   # The transform below maps the resolved name to user.name.
   #   resolve_sids:
   #     enabled: true
 
@@ -77,6 +88,11 @@ receivers:
   #   retry_on_failure:
   #     enabled: true
   #     max_elapsed_time: 0
+  #   resolve_sids:
+  #     enabled: true
+  #   # The query reads the Application channel.
+  #   exclude_providers:
+  #     - otelcol-contrib
 
 extensions:
 
@@ -136,16 +152,33 @@ processors:
             log.body["execution"]["thread_id"] > 0
 
       # The SID of the account the event was logged for. With resolve_sids
-      # enabled, the receiver also provides the account name.
+      # enabled, the receiver also provides the account (user.name is the
+      # short name), its domain and its type.
       - set(log.attributes["user.id"], log.body["security"]["user_id"])
         where IsString(log.body["security"]["user_id"]) and
             log.body["security"]["user_id"] != ""
-      - set(log.attributes["user.name"], log.body["security"]["user_name"])
-        where IsString(log.body["security"]["user_name"]) and
-            log.body["security"]["user_name"] != ""
+      - set(log.attributes["user.name"], log.body["security"]["account"])
+        where IsString(log.body["security"]["account"]) and
+            log.body["security"]["account"] != ""
+      - set(log.attributes["winlog.user.domain"], log.body["security"]["domain"])
+        where IsString(log.body["security"]["domain"]) and
+            log.body["security"]["domain"] != ""
+      - set(log.attributes["winlog.user.type"],
+            log.body["security"]["account_type"])
+        where IsString(log.body["security"]["account_type"]) and
+            log.body["security"]["account_type"] != ""
 
-      # Severity. The receiver sets the severity number from the rendered
-      # level name, but no severity text, maps Critical to FATAL instead of
+      # Without rendering information (suppress_rendering_info, or a
+      # provider that is not installed on this host) the level is the raw
+      # number. Name it as Windows does, so the statements below apply.
+      - set(log.body["level"], "Critical") where log.body["level"] == "1"
+      - set(log.body["level"], "Error") where log.body["level"] == "2"
+      - set(log.body["level"], "Warning") where log.body["level"] == "3"
+      - set(log.body["level"], "Information") where log.body["level"] == "4"
+      - set(log.body["level"], "Verbose") where log.body["level"] == "5"
+
+      # Severity. The receiver sets the severity number from the level
+      # name, but no severity text, maps Critical to FATAL instead of
       # ERROR2 and leaves Verbose unspecified. Align with the Logs Data
       # Model's SeverityNumber mapping for WinEvtLog.
       - set(log.severity_text, log.body["level"])
@@ -170,17 +203,22 @@ processors:
       - set(log.attributes["winlog.provider_guid"], log.body["provider"]["guid"])
         where IsString(log.body["provider"]["guid"]) and
             log.body["provider"]["guid"] != ""
+      # Classic (non-manifest) providers repeat their name as event source.
       - set(log.attributes["winlog.event_source"],
             log.body["provider"]["event_source"])
         where IsString(log.body["provider"]["event_source"]) and
-            log.body["provider"]["event_source"] != ""
+            log.body["provider"]["event_source"] != "" and
+            log.body["provider"]["event_source"] != log.body["provider"]["name"]
       # The record ID is what Event Viewer shows to locate an event.
       - set(log.attributes["winlog.record_id"], log.body["record_id"])
         where log.body["record_id"] != nil
+      # Task and opcode are "0" when the provider does not define them.
       - set(log.attributes["winlog.task"], log.body["task"])
-        where IsString(log.body["task"]) and log.body["task"] != ""
+        where IsString(log.body["task"]) and log.body["task"] != "" and
+            log.body["task"] != "0"
       - set(log.attributes["winlog.opcode"], log.body["opcode"])
-        where IsString(log.body["opcode"]) and log.body["opcode"] != ""
+        where IsString(log.body["opcode"]) and log.body["opcode"] != "" and
+            log.body["opcode"] != "0"
       - set(log.attributes["winlog.keywords"], log.body["keywords"])
         where log.body["keywords"] != nil and Len(log.body["keywords"]) > 0
       - set(log.attributes["winlog.version"], log.body["version"])
@@ -240,8 +278,14 @@ processors:
 
 exporters:
 
-  debug:
-    verbosity: detailed
+  # The debug exporter writes every event to the Collector's own log. As a
+  # Windows service, that log is the Application channel, so its output
+  # would flood the channel and push genuine events out of it. Enable it
+  # only when running otelcol-contrib.exe interactively from a console,
+  # and add it to the pipeline's exporters.
+  #
+  # debug:
+  #   verbosity: detailed
 
   otlp:
     # TODO: the Netdata Agent (on Linux) that receives the events. The
@@ -291,4 +335,4 @@ service:
         - transform/windows_event_log
         - groupbyattrs/windows_event_log
         - batch
-      exporters: [otlp, debug]
+      exporters: [otlp]
