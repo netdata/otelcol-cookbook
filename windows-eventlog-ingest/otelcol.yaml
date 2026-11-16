@@ -1,0 +1,294 @@
+---
+
+# OpenTelemetry configuration for ingesting Windows Event Log events into
+# Netdata.
+#
+# The Windows Event Log receiver subscribes to one event log channel per
+# receiver instance and passes the events as OTLP logs to Netdata's
+# OpenTelemetry Plugin. The Netdata Agent for Windows does not include that
+# plugin, so the events are sent to a Netdata Agent on a Linux host.
+
+receivers:
+
+  # One receiver per channel. To add a channel, copy a block, give it a new
+  # name after the slash, set `channel`, and add it to the pipeline below.
+  # List the channels on a host with `wevtutil el`.
+
+  windows_event_log/application:
+    channel: Application
+
+    # Start at the end of the channel and follow new events. Set to
+    # "beginning" for a one-time replay of everything the channel still
+    # holds (can be a lot of events).
+    start_at: end
+
+    # Persist the read position (bookmark) so restarts resume where they
+    # left off. Without storage, the bookmark is kept in memory only.
+    storage: file_storage/windows_event_log
+
+    # The receiver advances its bookmark after each batch, whether or not
+    # the batch was delivered downstream, so retries must never give up:
+    # with the default 5 minute budget the batch is discarded once it is
+    # exhausted. max_elapsed_time: 0 keeps retrying until delivery succeeds.
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 0
+
+  windows_event_log/system:
+    channel: System
+    start_at: end
+    storage: file_storage/windows_event_log
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 0
+
+  # TODO: enable to ingest the Security channel. Reading it requires
+  # administrative rights (the service installed by the MSI runs as
+  # LocalSystem), and it can be very high volume, especially on domain
+  # controllers. Remember to add it to the pipeline.
+  #
+  # windows_event_log/security:
+  #   channel: Security
+  #   start_at: end
+  #   storage: file_storage/windows_event_log
+  #   retry_on_failure:
+  #     enabled: true
+  #     max_elapsed_time: 0
+  #
+  #   # Resolve SIDs to account names with the Local Security Authority.
+  #   # The transform below maps the resolved name to user.name.
+  #   resolve_sids:
+  #     enabled: true
+
+  # An XML query can select events across channels or filter them, instead
+  # of `channel`. See
+  # https://learn.microsoft.com/en-us/windows/win32/wes/consuming-events
+  #
+  # windows_event_log/errors:
+  #   query: |
+  #     <QueryList>
+  #       <Query Id="0">
+  #         <Select Path="Application">*[System[(Level=1 or Level=2)]]</Select>
+  #         <Select Path="System">*[System[(Level=1 or Level=2)]]</Select>
+  #       </Query>
+  #     </QueryList>
+  #   start_at: end
+  #   storage: file_storage/windows_event_log
+  #   retry_on_failure:
+  #     enabled: true
+  #     max_elapsed_time: 0
+
+extensions:
+
+  file_storage/windows_event_log:
+    # Bookmarks of all receivers above (each receiver keeps its own key).
+    # %ProgramData% is persistent and writable by the LocalSystem service
+    # account and by administrators.
+    directory: ${env:ProgramData}/OpenTelemetry Collector/windows_event_log
+    create_directory: true
+
+  file_storage/otlp_sending_queue:
+    directory: ${env:ProgramData}/OpenTelemetry Collector/otlp_sending_queue
+    create_directory: true
+
+processors:
+
+  batch:
+
+  # Map the receiver's structured body to the OpenTelemetry Logs Data Model
+  # mapping for Windows Event Log (Message -> Body, Computer -> host.name,
+  # EventID -> winlog.event_id, remaining fields -> winlog.*), see
+  # https://opentelemetry.io/docs/specs/otel/logs/data-model-appendix/#windows-event-log
+  # Names below winlog.* follow Winlogbeat where it has one.
+  #
+  # Resource attributes (service.name, host.name, process.pid) are staged
+  # as log attributes and promoted by groupbyattrs below: the receiver
+  # emits all events under one shared resource, so setting resource
+  # attributes per event here would overwrite them for every other event
+  # in the same batch.
+  transform/windows_event_log:
+
+    error_mode: ignore
+    log_statements:
+
+      # Service identity.
+      #
+      # Netdata keys its log streams on (service.namespace, service.name),
+      # so service.name must stay low-cardinality. The provider (event
+      # source) is a registered, static name, such as "Service Control
+      # Manager" or "Microsoft-Windows-Security-Auditing". Fall back to
+      # the channel when the provider is unknown.
+      - set(log.attributes["service.name"], log.body["provider"]["name"])
+        where IsString(log.body["provider"]["name"]) and
+            log.body["provider"]["name"] != ""
+      - set(log.attributes["service.name"], log.body["channel"])
+        where log.attributes["service.name"] == nil and
+            IsString(log.body["channel"]) and log.body["channel"] != ""
+
+      - set(log.attributes["host.name"], log.body["computer"])
+        where IsString(log.body["computer"]) and log.body["computer"] != ""
+
+      - set(log.attributes["process.pid"], log.body["execution"]["process_id"])
+        where log.body["execution"]["process_id"] != nil and
+            log.body["execution"]["process_id"] > 0
+      - set(log.attributes["thread.id"], log.body["execution"]["thread_id"])
+        where log.body["execution"]["thread_id"] != nil and
+            log.body["execution"]["thread_id"] > 0
+
+      # The SID of the account the event was logged for. With resolve_sids
+      # enabled, the receiver also provides the account name.
+      - set(log.attributes["user.id"], log.body["security"]["user_id"])
+        where IsString(log.body["security"]["user_id"]) and
+            log.body["security"]["user_id"] != ""
+      - set(log.attributes["user.name"], log.body["security"]["user_name"])
+        where IsString(log.body["security"]["user_name"]) and
+            log.body["security"]["user_name"] != ""
+
+      # Severity. The receiver sets the severity number from the rendered
+      # level name, but no severity text, maps Critical to FATAL instead of
+      # ERROR2 and leaves Verbose unspecified. Align with the Logs Data
+      # Model's SeverityNumber mapping for WinEvtLog.
+      - set(log.severity_text, log.body["level"])
+        where IsString(log.body["level"]) and log.body["level"] != ""
+      - set(log.severity_number, SEVERITY_NUMBER_ERROR2)
+        where log.body["level"] == "Critical"
+      - set(log.severity_number, SEVERITY_NUMBER_DEBUG)
+        where log.body["level"] == "Verbose"
+
+      # Event identity and the remaining fields as winlog.* attributes.
+      - set(log.attributes["winlog.event_id"], log.body["event_id"]["id"])
+        where log.body["event_id"]["id"] != nil
+      - set(log.attributes["winlog.event_id_qualifiers"],
+            log.body["event_id"]["qualifiers"])
+        where log.body["event_id"]["qualifiers"] != nil and
+            log.body["event_id"]["qualifiers"] != 0
+      - set(log.attributes["winlog.channel"], log.body["channel"])
+        where IsString(log.body["channel"]) and log.body["channel"] != ""
+      - set(log.attributes["winlog.provider_name"], log.body["provider"]["name"])
+        where IsString(log.body["provider"]["name"]) and
+            log.body["provider"]["name"] != ""
+      - set(log.attributes["winlog.provider_guid"], log.body["provider"]["guid"])
+        where IsString(log.body["provider"]["guid"]) and
+            log.body["provider"]["guid"] != ""
+      - set(log.attributes["winlog.event_source"],
+            log.body["provider"]["event_source"])
+        where IsString(log.body["provider"]["event_source"]) and
+            log.body["provider"]["event_source"] != ""
+      # The record ID is what Event Viewer shows to locate an event.
+      - set(log.attributes["winlog.record_id"], log.body["record_id"])
+        where log.body["record_id"] != nil
+      - set(log.attributes["winlog.task"], log.body["task"])
+        where IsString(log.body["task"]) and log.body["task"] != ""
+      - set(log.attributes["winlog.opcode"], log.body["opcode"])
+        where IsString(log.body["opcode"]) and log.body["opcode"] != ""
+      - set(log.attributes["winlog.keywords"], log.body["keywords"])
+        where log.body["keywords"] != nil and Len(log.body["keywords"]) > 0
+      - set(log.attributes["winlog.version"], log.body["version"])
+        where log.body["version"] != nil
+      - set(log.attributes["winlog.activity_id"],
+            log.body["correlation"]["activity_id"])
+        where IsString(log.body["correlation"]["activity_id"])
+      - set(log.attributes["winlog.related_activity_id"],
+            log.body["correlation"]["related_activity_id"])
+        where IsString(log.body["correlation"]["related_activity_id"])
+
+      # Event payloads, kept as maps (Netdata indexes nested keys, such as
+      # winlog.event_data.TargetUserName).
+      - set(log.attributes["winlog.event_data"], log.body["event_data"])
+        where IsMap(log.body["event_data"]) and Len(log.body["event_data"]) > 0
+      - set(log.attributes["winlog.user_data"], log.body["user_data"])
+        where IsMap(log.body["user_data"])
+      # Security channel messages, parsed into sections by the receiver.
+      - set(log.attributes["winlog.details"], log.body["details"])
+        where IsMap(log.body["details"])
+      - set(log.attributes["winlog.processing_error_data"],
+            log.body["processing_error_data"])
+        where IsMap(log.body["processing_error_data"])
+      - set(log.attributes["winlog.debug_data"], log.body["debug_data"])
+        where IsMap(log.body["debug_data"])
+      - set(log.attributes["winlog.binary_event_data"],
+            log.body["binary_event_data"])
+        where IsString(log.body["binary_event_data"])
+
+      # Remaining execution fields (process and thread IDs mapped above).
+      - delete_key(log.body["execution"], "process_id")
+        where IsMap(log.body["execution"])
+      - delete_key(log.body["execution"], "thread_id")
+        where IsMap(log.body["execution"])
+      - set(log.attributes["winlog.execution"], log.body["execution"])
+        where IsMap(log.body["execution"]) and Len(log.body["execution"]) > 0
+
+      # Finally, the rendered message becomes the body. The remaining keys
+      # (system_time, level, computer, rendering_info) duplicate the
+      # timestamp, the severity and the fields above. Events whose provider
+      # has no message for the event ID get a synthesized one.
+      - set(log.body, log.body["message"])
+        where IsMap(log.body) and IsString(log.body["message"]) and
+            log.body["message"] != ""
+      - set(log.body, Format("%s event %d", [log.attributes["winlog.provider_name"],
+            log.attributes["winlog.event_id"]]))
+        where IsMap(log.body) and log.attributes["winlog.provider_name"] != nil and
+            log.attributes["winlog.event_id"] != nil
+
+  # Promote the staged identity attributes to the resource, splitting
+  # events with different values into separate resources.
+  groupbyattrs/windows_event_log:
+    keys:
+      - service.name
+      - host.name
+      - process.pid
+
+exporters:
+
+  debug:
+    verbosity: detailed
+
+  otlp:
+    # TODO: the Netdata Agent (on Linux) that receives the events. The
+    # Agent's OpenTelemetry Plugin listens on 127.0.0.1:4317 only by
+    # default; see the README for how to accept remote senders.
+    endpoint: netdata.example.com:4317
+
+    # Plaintext gRPC. Only suitable for trusted networks; see the README
+    # for setting up TLS or mutual TLS.
+    tls:
+      insecure: true
+
+    # With TLS on the Netdata Agent: verify its certificate against this
+    # CA, and present a client certificate when the Agent requires mutual
+    # TLS. Replace the `tls` section above with:
+    #
+    # tls:
+    #   ca_file: C:/ProgramData/OpenTelemetry Collector/tls/ca.pem
+    #   cert_file: C:/ProgramData/OpenTelemetry Collector/tls/client-cert.pem
+    #   key_file: C:/ProgramData/OpenTelemetry Collector/tls/client-key.pem
+
+    # Buffer batches on disk so they survive collector restarts, and never
+    # give up on delivery: the default retry budget (5 minutes) discards
+    # queued batches when Netdata is unreachable for longer.
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 0
+
+    sending_queue:
+      enabled: true
+      storage: file_storage/otlp_sending_queue
+
+service:
+
+  extensions:
+    - file_storage/windows_event_log
+    - file_storage/otlp_sending_queue
+
+  pipelines:
+
+    logs:
+      receivers:
+        - windows_event_log/application
+        - windows_event_log/system
+        # - windows_event_log/security
+      processors:
+        - transform/windows_event_log
+        - groupbyattrs/windows_event_log
+        - batch
+      exporters: [otlp, debug]
